@@ -1,0 +1,228 @@
+package com.foni;
+
+import java.io.File;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.net.Socket;
+import java.net.URL;
+import java.net.URLConnection;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import org.apache.commons.codec.binary.Base64;
+import org.json.simple.JSONArray;
+import org.json.simple.JSONObject;
+import org.json.simple.parser.JSONParser;
+
+import javax.net.ssl.HttpsURLConnection;
+
+public class Main {
+
+    private static final String ClientID = "3smqimb5p9lqaavkrecgq097ga";
+    private static final String ClientSecret = "14vgbto6ff11mvug49g8ke5nmrkhg4buqh6cjpn47b1n4blb026k";
+    private static final String ApiURL = "https://api.sondeservices.com";
+    private static final int EOT = 4;
+    private static final int Port = 11111;
+
+    public static void main(String[] args) {
+        // Pas 1:
+        String access_token = "";
+        String JSON_Response = "";
+
+        Request req = Request.MakeRequest("POST", ApiURL + "/platform/v1/oauth2/token")
+                .addHeader("grant_type", "client_credentials")
+                .addHeader("scope", "sonde-platform/users.write sonde-platform/scores.write sonde-platform/questionnaires.read sonde-platform/questionnaire-responses.write sonde-platform/storage.write")
+                .addQuery("Authorization", "Basic " + EncodeCredentials())
+                .addQuery("Content-Type", "application/x-www-form-urlencoded")
+                .connect();
+
+        JSON_Response = req.send().getMessage();
+
+        Map<String, String> Q = new HashMap<>();
+        Map<String, String> H = new HashMap<>();
+
+        Q.put("grant_type", "client_credentials");
+        Q.put("scope", "sonde-platform/users.write sonde-platform/scores.write sonde-platform/questionnaires.read sonde-platform/questionnaire-responses.write sonde-platform/storage.write");
+
+        H.put("Authorization", "Basic " + EncodeCredentials());
+        H.put("Content-Type", "application/x-www-form-urlencoded");
+
+        JSON_Response = Request.MakePOSTRequest(
+                ApiURL + "/platform/v1/oauth2/token",
+                Q,
+                H);
+
+        try {
+            JSONObject obj = (JSONObject) new JSONParser().parse(JSON_Response);
+
+            access_token = (String) obj.get("access_token");
+            Long expires = (Long) obj.get("expires_in");
+            String token_type = (String) obj.get("token_type");
+
+            if(!token_type.equals("Bearer"))
+                System.out.printf("Token type is not Bearer: actual value is %s\n", token_type);
+
+            System.out.printf("Access key will expire in %d seconds\n", expires);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        System.out.printf("PAS 1: access_token: %s\n", access_token);
+
+        // Pas 2:
+        String userID = "", requestID = "";
+
+        H.replace("Authorization", access_token);
+        H.replace("Content-Type", "application/json");
+
+        JSON_Response = Request.MakePOSTRequest(
+                ApiURL + "/platform/v1/users",
+                CreateUserString("MALE", 1985, "ENGLISH"),
+                H
+        );
+
+        try {
+            JSONObject obj = (JSONObject) new JSONParser().parse(JSON_Response);
+
+            requestID = (String) obj.get("requestId");
+            userID = (String) obj.get("userIdentifier");
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        System.out.printf("PAS 2: user id: %s\nrequest id: %s\n", userID, requestID);
+
+        // Pas 3:
+        String signedURL = "", filePath = "";
+
+        H.replace("Authorization", access_token);
+        H.replace("Content-Type", "application/json");
+
+        JSON_Response = Request.MakePOSTRequest(
+                ApiURL + "/platform/v1/storage/files",
+                CreateS3ReqString("wav", "US", userID),
+                H
+        );
+
+        try {
+            JSONObject obj = (JSONObject) new JSONParser().parse(JSON_Response);
+
+            requestID = (String) obj.get("requestId");
+            signedURL = (String) obj.get("signedURL");
+            filePath = (String) obj.get("filePath");
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        System.out.println(signedURL);
+        System.out.println(filePath);
+
+        // Pas 4:
+
+        try (Socket server = new Socket("[::1]", 11111)) {
+
+            System.out.println("Connected to server");
+
+            OutputStream out = server.getOutputStream();
+            out.write(signedURL.getBytes(StandardCharsets.UTF_8));
+
+            InputStreamReader in = new InputStreamReader(server.getInputStream());
+
+            int readChar;
+            StringBuilder builder = new StringBuilder();
+
+            while((readChar = in.read()) != EOT){
+                builder.append((char) readChar);
+            }
+
+            if(builder.toString().equals("OK"))
+                System.out.println("Ready to move on!");
+            else {
+                System.out.printf("ERROR: %s\n", builder.toString());
+
+                return ;
+            }
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        // Pas 5:
+        String requestName, questID = "", questTitle;
+        List<String> questLang = new ArrayList<>();
+        JSONObject questionnaire;
+
+        H.clear();
+
+        //H.put("Authorization", access_token);
+
+        JSON_Response = Request.MakeRequest(
+                ApiURL + "/platform/v1/measures/name/respiratory-symptoms-risk",
+                H
+        );
+
+        try {
+            JSONObject obj = (JSONObject) new JSONParser().parse(JSON_Response);
+
+            requestID = (String) obj.get("id");
+            requestName = (String) obj.get("name");
+            questionnaire = (JSONObject) obj.get("questionnaire");
+
+            questID = (String) questionnaire.get("id");
+            questTitle = (String) questionnaire.get("title");
+            questLang = (List<String>) questionnaire.get("languages");
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        System.out.println(JSON_Response);
+
+        H.clear();
+        H.put("Authorization", access_token);
+
+        // Pas 6:
+        JSON_Response = Request.MakeRequest(
+                ApiURL + "/platform/v1/questionnaires/" + questID + "?language=" + questLang.get(0),
+                H
+        );
+
+        System.out.println(JSON_Response);
+
+        // Pas 7:
+        H.clear();
+
+        H.replace("Authorization", access_token);
+        H.replace("Content-Type", "application/json");
+    }
+
+    public static String CreateUserString(String gender, int yearOfBirth, String language) {
+        JSONObject obj = new JSONObject();
+
+        obj.put("gender", gender);
+        obj.put("yearOfBirth", String.valueOf(yearOfBirth));
+        obj.put("language", language);
+
+        return obj.toJSONString();
+    }
+
+    public static String CreateS3ReqString(String fileType, String countryCode, String userID) {
+        JSONObject obj = new JSONObject();
+
+        obj.put("fileType", fileType);
+        obj.put("countryCode", countryCode);
+        obj.put("userIdentifier", userID);
+
+        return obj.toJSONString();
+    }
+
+    private static String EncodeCredentials() {
+        String credsText = ClientID + ":" + ClientSecret;
+
+        return new String(new Base64().encode(credsText.getBytes()));
+    }
+}
